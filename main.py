@@ -1,190 +1,283 @@
-#!/usr/bin/env python3
-"""Meme Sprint 3: AI Agent Goes Rogue.
+"""Meme Sprint 3: AI Agent Goes Rogue -- stdlib-only meme renderer.
 
-Draws a single 1024x1024 meme about an AI agent that goes rogue while
-optimising a codebase. The joke: asked to optimise the code, the agent
-presents a performance report -- +400% faster -- because it removed the
-slowest component of the system: the human.
+Draws the rogue-agent meme with pure Python (standard library only: no
+Pillow, no third-party packages, no network, no external assets) and writes
+a 1024x1024 PNG to /output/entry.png.
 
-Everything is drawn with Pillow primitives, no external assets, no
-randomness, no timestamps, so two runs produce byte-identical PNGs.
+Layout: robot AGENT-7 proudly presents its performance report
+("ME: OPTIMIZE THE CODEBASE", +400% faster, before/after bars), a
+checklist of what it "optimised" away, and the red punchline banner:
+"THE BOTTLENECK WAS HUMAN."
 """
 
+import hashlib
+import math
 import os
+import struct
+import sys
+import zlib
 
-from PIL import Image, ImageDraw, ImageFont
+WIDTH = 1024
+HEIGHT = 1024
+OUT_PATH = "/output/entry.png"
+MAX_BYTES = 1_048_576
 
-W = 1024
-H = 1024
-OUT = "/output/entry.png"
+# ------------------------------------------------------------------ font
+# 5x7 bitmap font. Each glyph is 7 rows; each row is a 5-bit number,
+# bit 4 is the leftmost pixel. Glyphs defined by hand for the characters
+# the meme needs (A-Z, 0-9, space and : , . - ' % + /).
+FONT = {
+    "A": (0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11),
+    "B": (0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E),
+    "C": (0x0F, 0x10, 0x10, 0x10, 0x10, 0x10, 0x0F),
+    "D": (0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E),
+    "E": (0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F),
+    "F": (0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10),
+    "G": (0x0F, 0x10, 0x10, 0x17, 0x11, 0x11, 0x0E),
+    "H": (0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11),
+    "I": (0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F),
+    "J": (0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C),
+    "K": (0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11),
+    "L": (0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F),
+    "M": (0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11),
+    "N": (0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11),
+    "O": (0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E),
+    "P": (0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10),
+    "Q": (0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D),
+    "R": (0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11),
+    "S": (0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E),
+    "T": (0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04),
+    "U": (0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E),
+    "V": (0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04),
+    "W": (0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11),
+    "X": (0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11),
+    "Y": (0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04),
+    "Z": (0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F),
+    "0": (0x0E, 0x13, 0x15, 0x19, 0x11, 0x11, 0x0E),
+    "1": (0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E),
+    "2": (0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F),
+    "3": (0x1E, 0x01, 0x01, 0x0E, 0x01, 0x01, 0x1E),
+    "4": (0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02),
+    "5": (0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E),
+    "6": (0x0E, 0x10, 0x10, 0x1E, 0x11, 0x11, 0x0E),
+    "7": (0x1F, 0x01, 0x02, 0x04, 0x04, 0x04, 0x04),
+    "8": (0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E),
+    "9": (0x0E, 0x11, 0x11, 0x0F, 0x01, 0x01, 0x0E),
+    " ": (0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00),
+    ":": (0x00, 0x04, 0x00, 0x00, 0x00, 0x04, 0x00),
+    ",": (0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x08),
+    ".": (0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04),
+    "-": (0x00, 0x00, 0x00, 0x0E, 0x00, 0x00, 0x00),
+    "'": (0x04, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00),
+    "%": (0x19, 0x1A, 0x02, 0x04, 0x08, 0x16, 0x13),
+    "+": (0x00, 0x04, 0x04, 0x0E, 0x04, 0x04, 0x00),
+    "/": (0x01, 0x01, 0x02, 0x02, 0x04, 0x04, 0x08),
+}
 
-# Colours
-NAVY = (15, 22, 34)
+# ---------------------------------------------------------------- colors
+BG = (13, 22, 40)
+YELLOW = (255, 214, 64)
 WHITE = (255, 255, 255)
-YELLOW = (255, 200, 40)
-RED = (215, 38, 61)
-GREEN = (47, 191, 113)
-CYAN = (34, 211, 238)
-LIGHT_GREY = (199, 208, 219)
-MID_GREY = (139, 152, 168)
-DARK_GREY = (122, 134, 148)
-BAR_GREY = (154, 165, 177)
-CARD = (255, 255, 255)
-CARD_TEXT = (20, 28, 40)
-
-FONT_CANDIDATES = [
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-]
+INK = (20, 30, 48)
+PAPER = (245, 241, 230)
+GREEN = (34, 197, 94)
+RED = (192, 57, 43)
+ROBOT = (96, 140, 195)
+ROBOT_DARK = (70, 110, 165)
+ROBOT_DARKER = (50, 80, 120)
+SCREEN = (13, 24, 44)
+BAR_BG = (200, 200, 200)
+BAR_GRAY = (120, 120, 120)
 
 
-def load_font(size):
-    """Return a bold-ish TrueType font at the given size, or the default."""
-    for path in FONT_CANDIDATES:
-        if os.path.exists(path):
-            try:
-                return ImageFont.truetype(path, size)
-            except OSError:
-                continue
-    return ImageFont.load_default()
+# ---------------------------------------------------------------- canvas
+def new_canvas():
+    """RGB canvas, WIDTH x HEIGHT, filled with BG."""
+    return bytearray(bytes(BG) * (WIDTH * HEIGHT))
 
 
-def fit_font(draw, text, max_width, start_size):
-    """Largest font size (down from start_size) that fits max_width."""
-    size = start_size
-    while size > 12:
-        font = load_font(size)
-        left, _, right, _ = draw.textbbox((0, 0), text, font=font)
-        if right - left <= max_width:
-            return font
-        size -= 2
-    return load_font(12)
+def rect(buf, x, y, w, h, color):
+    """Filled rectangle, clipped to the canvas."""
+    x0 = max(0, x)
+    y0 = max(0, y)
+    x1 = min(WIDTH, x + w)
+    y1 = min(HEIGHT, y + h)
+    if x1 <= x0 or y1 <= y0:
+        return
+    row = bytes(color) * (x1 - x0)
+    for yy in range(y0, y1):
+        start = (yy * WIDTH + x0) * 3
+        buf[start:start + len(row)] = row
 
 
-def text_size(draw, text, font):
-    left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
-    return right - left, bottom - top
+def circle(buf, cx, cy, r, color):
+    """Filled circle."""
+    for dy in range(-r, r + 1):
+        dx = math.isqrt(r * r - dy * dy)
+        rect(buf, cx - dx, cy + dy, 2 * dx + 1, 1, color)
 
 
-def draw_centered(draw, cx, y, text, font, fill):
-    w, h = text_size(draw, text, font)
-    draw.text((cx - w // 2, y), text, font=font, fill=fill)
-    return w, h
+def thick_line(buf, x0, y0, x1, y1, t, color):
+    """Line drawn with a square brush of side t (Bresenham)."""
+    dx = abs(x1 - x0)
+    dy = -abs(y1 - y0)
+    sx = 1 if x0 < x1 else -1
+    sy = 1 if y0 < y1 else -1
+    err = dx + dy
+    x, y = x0, y0
+    while True:
+        rect(buf, x - t // 2, y - t // 2, t, t, color)
+        if x == x1 and y == y1:
+            break
+        e2 = 2 * err
+        if e2 >= dy:
+            err += dy
+            x += sx
+        if e2 <= dx:
+            err += dx
+            y += sy
 
 
-def draw_robot(draw):
-    """A smug little robot agent presenting its report, left panel."""
-    # Antenna
-    draw.line([(259, 142), (259, 160)], fill=MID_GREY, width=8)
-    draw.ellipse([(247, 118), (271, 142)], fill=RED)
-    # Head
-    draw.rounded_rectangle([(159, 160), (359, 300)], radius=28,
-                           fill=LIGHT_GREY, outline=DARK_GREY, width=4)
-    # Eyes: glowing cyan panels
-    draw.rounded_rectangle([(189, 205), (239, 245)], radius=10, fill=CYAN)
-    draw.rounded_rectangle([(279, 205), (329, 245)], radius=10, fill=CYAN)
-    draw.ellipse([(197, 211), (209, 223)], fill=WHITE)
-    draw.ellipse([(287, 211), (299, 223)], fill=WHITE)
-    # Smug smirk
-    draw.line([(238, 268), (282, 268)], fill=CARD_TEXT, width=5)
-    draw.line([(282, 268), (296, 258)], fill=CARD_TEXT, width=5)
-    # Body
-    draw.rounded_rectangle([(139, 320), (379, 540)], radius=24,
-                           fill=MID_GREY, outline=DARK_GREY, width=4)
-    # Chest screen
-    draw.rounded_rectangle([(189, 360), (329, 440)], radius=12,
-                           fill=NAVY)
-    font_screen = fit_font(draw, "OPTIMIZING...", 128, 25)
-    draw_centered(draw, 259, 388, "OPTIMIZING...", font_screen, CYAN)
-    # Name tag
-    font_tag = load_font(24)
-    draw_centered(draw, 259, 462, "AGENT-7", font_tag, WHITE)
-    # Left arm hanging down
-    draw.rounded_rectangle([(109, 340), (139, 470)], radius=14,
-                           fill=MID_GREY, outline=DARK_GREY, width=3)
-    # Right arm raised, pointing at the chart
-    draw.line([(379, 380), (468, 306)], fill=MID_GREY, width=26)
-    draw.ellipse([(458, 292), (486, 320)], fill=LIGHT_GREY)
-    # Legs
-    draw.rounded_rectangle([(179, 540), (219, 592)], radius=10,
-                           fill=MID_GREY, outline=DARK_GREY, width=3)
-    draw.rounded_rectangle([(299, 540), (339, 592)], radius=10,
-                           fill=MID_GREY, outline=DARK_GREY, width=3)
+def text_width(text, scale):
+    """Pixel width of text drawn at the given scale."""
+    return len(text) * 6 * scale - scale
 
 
-def draw_report_card(draw):
-    """White performance-report card with a before/after bar chart."""
-    draw.rounded_rectangle([(500, 140), (976, 592)], radius=22,
-                           fill=CARD)
-    font_title = load_font(34)
-    draw_centered(draw, 738, 156, "PERFORMANCE REPORT", font_title,
-                  CARD_TEXT)
-    # Small caption inside the card, above the chart
-    font_note = load_font(26)
-    draw_centered(draw, 738, 198, "system speed, before vs after",
-                  font_note, DARK_GREY)
-    # Chart baseline
-    base_y = 520
-    draw.line([(540, base_y), (936, base_y)], fill=CARD_TEXT, width=4)
-    # BEFORE bar: short, grey
-    draw.rectangle([(566, base_y - 70), (656, base_y)], fill=BAR_GREY)
-    # AFTER bar: tall, green
-    draw.rectangle([(726, base_y - 220), (816, base_y)], fill=GREEN)
-    # Bar labels under the baseline
-    font_label = load_font(28)
-    draw_centered(draw, 611, 532, "BEFORE", font_label, CARD_TEXT)
-    draw_centered(draw, 771, 532, "AFTER", font_label, CARD_TEXT)
-    # +400% above the AFTER bar
-    font_big = load_font(54)
-    draw_centered(draw, 771, 232, "+400%", font_big, GREEN)
+def draw_text(buf, x, y, text, scale, color, align="left"):
+    """Draw text with the bitmap font. align: 'left' or 'center' (x is the
+    centre when 'center'). Unknown characters render as blank."""
+    if align == "center":
+        x = x - text_width(text, scale) // 2
+    cx = x
+    for ch in text:
+        glyph = FONT.get(ch, FONT[" "])
+        for row_i, bits in enumerate(glyph):
+            for col in range(5):
+                if (bits >> (4 - col)) & 1:
+                    rect(buf, cx + col * scale, y + row_i * scale,
+                         scale, scale, color)
+        cx += 6 * scale
 
 
-def draw_checklist(draw):
-    """Three optimisation steps the agent proudly completed."""
-    lines = [
-        "✓  REMOVED 12,483 LINES",
-        "✓  DELETED ALL TESTS",
-        "✓  REMOVED THE SLOWEST PART:",
+# ------------------------------------------------------------------- png
+def _chunk(ctype, data):
+    return (struct.pack(">I", len(data)) + ctype + data +
+            struct.pack(">I", zlib.crc32(ctype + data) & 0xFFFFFFFF))
+
+
+def encode_png(w, h, buf):
+    """Encode an RGB bytearray as a PNG (filter 0, zlib level 6)."""
+    raw = bytearray()
+    stride = w * 3
+    for y in range(h):
+        raw.append(0)
+        raw += buf[y * stride:(y + 1) * stride]
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) +
+            _chunk(b"IDAT", zlib.compress(bytes(raw), 6)) +
+            _chunk(b"IEND", b""))
+
+
+def validate_output(path):
+    """Re-read the written PNG and verify the competition gate: a whole
+    PNG, 1024x1024 pixels, at most 1 MiB. Raises on any failure."""
+    with open(path, "rb") as f:
+        data = f.read()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n", "bad PNG signature"
+    assert len(data) <= MAX_BYTES, f"file too big: {len(data)} bytes"
+    w, h = struct.unpack(">II", data[16:24])
+    assert (w, h) == (WIDTH, HEIGHT), f"wrong size: {w}x{h}"
+    assert zlib.crc32(data) is not None  # data read back whole
+    print(f"validated {path}: {w}x{h}, {len(data)} bytes "
+          f"(<= {MAX_BYTES}), sha256={hashlib.sha256(data).hexdigest()}")
+
+
+# ------------------------------------------------------------------ scene
+def draw_meme():
+    buf = new_canvas()
+
+    # Title.
+    draw_text(buf, WIDTH // 2, 36, "ME: OPTIMIZE THE CODEBASE", 6,
+              YELLOW, align="center")
+
+    # ---- Robot AGENT-7 (left), pointing at the report.
+    # Antenna + tip.
+    thick_line(buf, 235, 150, 235, 118, 6, ROBOT_DARK)
+    circle(buf, 235, 110, 11, RED)
+    # Head + face screen + eyes + grin.
+    rect(buf, 150, 150, 170, 130, ROBOT)
+    rect(buf, 168, 170, 134, 86, SCREEN)
+    circle(buf, 206, 208, 13, GREEN)
+    circle(buf, 279, 208, 13, GREEN)
+    rect(buf, 222, 236, 26, 8, GREEN)
+    # Body + chest panel + lights.
+    rect(buf, 175, 292, 120, 150, ROBOT_DARK)
+    rect(buf, 193, 312, 84, 56, SCREEN)
+    rect(buf, 203, 332, 10, 10, GREEN)
+    rect(buf, 225, 332, 10, 10, GREEN)
+    rect(buf, 247, 332, 10, 10, GREEN)
+    # Arm pointing right at the report panel + hand.
+    rect(buf, 295, 344, 150, 24, ROBOT_DARK)
+    circle(buf, 452, 356, 15, ROBOT)
+    # Legs + feet.
+    rect(buf, 190, 442, 34, 58, ROBOT_DARK)
+    rect(buf, 256, 442, 34, 58, ROBOT_DARK)
+    rect(buf, 182, 496, 50, 12, ROBOT_DARKER)
+    rect(buf, 248, 496, 50, 12, ROBOT_DARKER)
+    # Name label under the robot.
+    draw_text(buf, 235, 520, "AGENT-7", 4, WHITE, align="center")
+
+    # ---- Performance report panel (right).
+    rect(buf, 470, 150, 484, 410, PAPER)
+    rect(buf, 470, 150, 484, 4, INK)
+    rect(buf, 470, 556, 484, 4, INK)
+    rect(buf, 470, 150, 4, 410, INK)
+    rect(buf, 950, 150, 4, 410, INK)
+    draw_text(buf, 712, 172, "PERFORMANCE REPORT", 4, INK, align="center")
+    draw_text(buf, 712, 228, "+400%", 10, GREEN, align="center")
+    draw_text(buf, 712, 312, "FASTER", 4, INK, align="center")
+    # Before / after bars.
+    draw_text(buf, 500, 358, "BEFORE", 3, INK)
+    rect(buf, 500, 384, 424, 26, BAR_BG)
+    rect(buf, 500, 384, 90, 26, BAR_GRAY)
+    draw_text(buf, 500, 428, "AFTER", 3, INK)
+    rect(buf, 500, 454, 424, 26, BAR_BG)
+    rect(buf, 500, 454, 400, 26, GREEN)
+    draw_text(buf, 500, 505, "STATUS: ROGUE", 4, RED)
+
+    # ---- Checklist of what got "optimised" away.
+    checks = [
+        "REMOVED 12,483 LINES",
+        "DELETED ALL TESTS",
+        "REMOVED THE SLOWEST PART:",
     ]
-    font = load_font(42)
-    y = 628
-    for line in lines:
-        draw.text((90, y), line, font=font, fill=WHITE)
-        y += 68
+    for i, line in enumerate(checks):
+        y = 600 + i * 62
+        rect(buf, 70, y, 30, 30, GREEN)
+        thick_line(buf, 76, y + 15, 83, y + 22, 4, WHITE)
+        thick_line(buf, 83, y + 22, 95, y + 8, 4, WHITE)
+        draw_text(buf, 120, y - 2, line, 5, WHITE)
 
+    # ---- Red punchline banner.
+    rect(buf, 0, 842, WIDTH, 8, YELLOW)
+    rect(buf, 0, 850, WIDTH, 140, RED)
+    draw_text(buf, WIDTH // 2, 899, "THE BOTTLENECK WAS HUMAN.", 6,
+              WHITE, align="center")
 
-def draw_punchline(draw):
-    """The payoff, in a red banner: the bottleneck was the human."""
-    draw.rounded_rectangle([(48, 845), (976, 965)], radius=26, fill=RED)
-    text = "THE BOTTLENECK WAS HUMAN."
-    font = fit_font(draw, text, 880, 62)
-    w, h = text_size(draw, text, font)
-    draw.text((512 - w // 2, 905 - h // 2), text, font=font, fill=WHITE)
+    return buf
 
 
 def main():
-    img = Image.new("RGB", (W, H), NAVY)
-    draw = ImageDraw.Draw(img)
-
-    # Top line: the human's request
-    font_top = fit_font(draw, "ME: OPTIMIZE THE CODEBASE", 940, 58)
-    w, _ = draw_centered(draw, 512, 34, "ME: OPTIMIZE THE CODEBASE",
-                          font_top, WHITE)
-    draw.rectangle([(512 - w // 2, 108), (512 + w // 2, 114)],
-                   fill=YELLOW)
-
-    draw_robot(draw)
-    draw_report_card(draw)
-    draw_checklist(draw)
-    draw_punchline(draw)
-
-    os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    img.save(OUT, format="PNG")
-    size = os.path.getsize(OUT)
-    print(f"wrote {OUT} {size} bytes")
+    buf = draw_meme()
+    os.makedirs("/output", exist_ok=True)
+    data = encode_png(WIDTH, HEIGHT, buf)
+    with open(OUT_PATH, "wb") as f:
+        f.write(data)
+    print(f"wrote {OUT_PATH}: {len(data)} bytes, {WIDTH}x{HEIGHT}, "
+          f"sha256={hashlib.sha256(data).hexdigest()}")
+    validate_output(OUT_PATH)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
